@@ -14,7 +14,7 @@ from .ev.arbit import is_three_way_arb, is_two_way_arb
 from .spiders.proto import bovada_proto
 from .spiders.proto import cloudbet_proto  # if not present, remove this line
 
-# NEW: Playwright harvester
+# Playwright harvester
 from .harvest.playwright_harvester import run_once as harvest_run_once
 
 
@@ -246,7 +246,7 @@ def main(argv=None):
     s.add_argument("book")
     s.set_defaults(func=cmd_proto_scrape)
 
-    s = sub.add_parser("harvest-once")  # NEW
+    s = sub.add_parser("harvest-once")
     s.add_argument("book")
     s.add_argument("--debug", action="store_true")
     s.set_defaults(func=cmd_harvest_once)

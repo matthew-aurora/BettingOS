@@ -1,177 +1,172 @@
 from __future__ import annotations
-
-import json
-import re
-import time
-from dataclasses import dataclass
+import json, re, time
+from pathlib import Path
 from datetime import datetime, timezone
-from typing import Iterable
-
+from typing import Any, Callable, Iterable
 import yaml
+from pymongo.errors import PyMongoError
 from playwright.sync_api import sync_playwright
 
-from ..config import SETTINGS
 from ..db.mongo import get_db
+from ..config import SETTINGS
 
+# Where to save local debug captures
+DEBUG_DIR = Path("debug/harvest")
 
-@dataclass
-class HarvestCfg:
-    start_urls: list[str]
-    xhr_allow: list[str]
-    wait_for: list[str]
-    headless: bool
-    max_time_s: int
+def _now_utc():
+    return datetime.now(timezone.utc)
 
-
-def _load_book_cfg(book_key: str) -> HarvestCfg:
-    with open("books.yaml", "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    book = next((b for b in data.get("books", []) if b.get("key") == book_key), None)
-    if not book:
-        raise SystemExit(f"book '{book_key}' not found in books.yaml")
-
-    h = (book.get("harvest") or {})
-    start_urls = h.get("start_urls") or []
-    if not start_urls:
-        raise SystemExit(f"book '{book_key}' has no harvest.start_urls configured")
-
-    xhr_allow = h.get("xhr_allow") or []
-    wait_for = h.get("wait_for") or ["body"]
-    headless = bool(h.get("headless", True))
-    max_time_s = int(h.get("max_time_s", 8))
-
-    return HarvestCfg(
-        start_urls=start_urls,
-        xhr_allow=xhr_allow,
-        wait_for=wait_for,
-        headless=headless,
-        max_time_s=max_time_s,
-    )
-
-
-def _compile_patterns(patterns: Iterable[str]) -> list[re.Pattern]:
-    out = []
-    for p in patterns:
-        try:
-            out.append(re.compile(p))
-        except re.error:
-            # treat as literal substring if regex fails
-            out.append(re.compile(re.escape(p)))
+def _compile_filters(patterns: Iterable[str]) -> list[Callable[[str], bool]]:
+    """Return a list of callables that test if a URL should be kept."""
+    out: list[Callable[[str], bool]] = []
+    for p in patterns or []:
+        p = p.strip()
+        if not p:
+            continue
+        # Treat entries that look like regexes as regex; else substring
+        is_regex = any(ch in p for ch in r".*+?[](){}|\^$")
+        if is_regex:
+            rx = re.compile(p)
+            out.append(lambda url, rx=rx: bool(rx.search(url)))
+        else:
+            out.append(lambda url, sub=p: sub in url)
+    if not out:
+        # Keep everything if no filter is present
+        out.append(lambda _url: True)
     return out
 
-
-def run_once(book_key: str, debug: bool = False) -> int:
-    """
-    Open each configured start_url and capture XHR/Fetch responses whose URLs
-    match any `xhr_allow` pattern. Store lightweight records in `harvest_logs`.
-    Returns the number of matched XHR responses.
-    """
-    cfg = _load_book_cfg(book_key)
-    allow = _compile_patterns(cfg.xhr_allow)
-    db = get_db()
-    coll = db.get_collection("harvest_logs")
-
-    hits = []
-
-    def _allowed(url: str) -> bool:
-        if not allow:
+def _matches(url: str, filters: list[Callable[[str], bool]]) -> bool:
+    for f in filters:
+        if f(url):
             return True
-        return any(p.search(url) for p in allow)
+    return False
 
-    now = datetime.now(timezone.utc)
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=cfg.headless)
-        context = browser.new_context(user_agent=SETTINGS.user_agent)
+def _safe_json(obj: Any) -> Any:
+    """Best-effort conversion to JSON-serializable."""
+    try:
+        json.dumps(obj)
+        return obj
+    except Exception:
+        return {"_note": "non-json-serializable object"}
 
-        # capture responses for the whole context
+def harvest_run_once(book_key: str, debug: bool = False) -> int:
+    """
+    Open each configured page for the given book, capture XHR/JSON responses that
+    match 'xhr_allow' filters, save them to Mongo (collection 'harvest_raw') and
+    to jsonl in debug/harvest/<book>/.
+    Returns the number of JSON payloads inserted into Mongo.
+    """
+    # --- load harvest config from books.yaml ---
+    with open("books.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    book = next((b for b in cfg.get("books", []) if b.get("key") == book_key), None)
+    if not book:
+        raise RuntimeError(f"book '{book_key}' not found in books.yaml")
+
+    h = book.get("harvest") or {}
+    start_urls: list[str] = h.get("start_urls", [])
+    xhr_allow: list[str] = h.get("xhr_allow", [])
+    wait_for: list[str] = h.get("wait_for", ["body"])
+    headless: bool = bool(h.get("headless", True))
+    max_time_s: int = int(h.get("max_time_s", 8))
+
+    if not start_urls:
+        raise RuntimeError(f"book '{book_key}' has no harvest.start_urls configured")
+
+    filters = _compile_filters(xhr_allow)
+    db = get_db()
+    raw_coll = db.get_collection("harvest_raw")
+
+    # prepare debug writer
+    ts_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_dir = DEBUG_DIR / book_key
+    _ensure_dir(out_dir)
+    out_path = out_dir / f"{ts_tag}.jsonl"
+    fout = out_path.open("a", encoding="utf-8")
+
+    inserted = 0
+    total_seen = 0
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context(
+            user_agent=SETTINGS.user_agent,
+            ignore_https_errors=True,
+            locale="en-US",
+        )
+        page = context.new_page()
+
+        # capture handler
         def on_response(resp):
+            nonlocal inserted, total_seen
             try:
                 req = resp.request
-                if req.resource_type not in ("xhr", "fetch"):
-                    return
+                rtype = req.resource_type
                 url = resp.url
-                if not _allowed(url):
+                if rtype not in ("xhr", "fetch"):
                     return
-                status = resp.status
-                ct = resp.headers.get("content-type", "")
-                length = int(resp.headers.get("content-length") or 0)
+                if not _matches(url, filters):
+                    return
+                ctype = resp.headers.get("content-type", "")
+                if "json" not in ctype.lower():
+                    return
 
-                j = None
-                if "json" in ct.lower():
-                    try:
-                        j = resp.json()
-                    except Exception:
-                        # fall back to text, capped
-                        try:
-                            txt = resp.text()
-                            j = {"_text": txt[:4000]}
-                        except Exception:
-                            j = {"_note": "unreadable body"}
+                total_seen += 1
+                # May throw if body not JSON
+                data = resp.json()
+                rec = {
+                    "book": book_key,
+                    "page_url": page.url,
+                    "url": url,
+                    "status": resp.status,
+                    "content_type": ctype,
+                    "captured_at_utc": _now_utc(),
+                    "json": data,
+                }
+                # write debug
+                line = json.dumps({
+                    "t": rec["captured_at_utc"].isoformat(),
+                    "page": rec["page_url"],
+                    "url": rec["url"],
+                    "status": rec["status"],
+                    "ct": rec["content_type"],
+                    "json": rec["json"],
+                }, ensure_ascii=False)
+                fout.write(line + "\n")
 
-                hits.append(
-                    {
-                        "book": book_key,
-                        "url": url,
-                        "status": status,
-                        "content_type": ct,
-                        "length": length,
-                        "captured_at_utc": now,
-                        "json": j,
-                    }
-                )
-                if debug:
-                    print(f"[harvest] {status} {url} ct={ct} len={length or '-'}")
-            except Exception as e:
-                if debug:
-                    print(f"[harvest] response error: {e}")
+                # insert to mongo
+                try:
+                    raw_coll.insert_one({**rec, "json": _safe_json(data)})
+                    inserted += 1
+                except PyMongoError:
+                    # Still keep debug line; ignore DB error in this prototype
+                    pass
+            except Exception:
+                # swallow per-response errors; this is a best-effort collector
+                return
 
-        context.on("response", on_response)
+        page.on("response", on_response)
 
-        for u in cfg.start_urls:
-            page = context.new_page()
-            if debug:
-                print(f"[harvest] open {u}")
-            try:
-                page.goto(u, timeout=45000, wait_until="domcontentloaded")
-                for sel in cfg.wait_for:
-                    try:
-                        page.wait_for_selector(sel, timeout=8000)
-                    except Exception:
-                        if debug:
-                            print(f"[harvest] wait_for_selector timeout: {sel}")
-                # let XHR settle
-                time.sleep(max(1, cfg.max_time_s))
-            finally:
-                page.close()
+        for url in start_urls:
+            page.goto(url, wait_until="networkidle")
+            # Optional: wait for DOM hints to stabilize
+            for sel in wait_for:
+                try:
+                    page.wait_for_selector(sel, timeout=5_000)
+                except Exception:
+                    pass
+            # Let background XHRs flow
+            time.sleep(max_time_s)
 
+        # Clean up
+        page.off("response", on_response)
         context.close()
         browser.close()
 
-    # persist lightweight logs (cap json size to keep DB sane)
-    docs = []
-    for h in hits:
-        j = h.get("json")
-        # keep it small
-        if isinstance(j, (list, dict)):
-            try:
-                js = json.dumps(j)
-                if len(js) > 20000:
-                    j = {"_truncated": True}
-            except Exception:
-                j = {"_note": "non-serializable"}
-        h["json"] = j
-        docs.append(h)
-
-    if docs:
-        coll.insert_many(docs, ordered=False)
-
-    # quick summary
+    fout.close()
     if debug:
-        by_host = {}
-        for h in hits:
-            host = re.sub(r"^https?://", "", h["url"]).split("/")[0]
-            by_host[host] = by_host.get(host, 0) + 1
-        print("[harvest] summary by host:", by_host)
-
-    return len(hits)
+        print(f"[harvest] book={book_key} seen={total_seen} inserted={inserted} file={out_path}")
+    return inserted

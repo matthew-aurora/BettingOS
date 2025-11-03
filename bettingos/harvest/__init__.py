@@ -1,1 +1,2 @@
-# makes `bettingos.harvest` a package
+from __future__ import annotations
+__all__ = ["playwright_harvester"]
