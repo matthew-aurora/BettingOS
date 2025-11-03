@@ -1,0 +1,154 @@
+books:
+- key: bovada
+  name: Bovada
+  website: "https://www.bovada.lv"
+  enabled: true
+  compliance_mode: loose
+  registry:
+    robots_url: "https://www.bovada.lv/robots.txt"
+    tos_url: "https://www.bovada.lv/help/terms-conditions"
+    tos_notes: "Concept phase. Review before production."
+    allowed_paths:
+      - "/services/sports/event/v2/events"
+      - "/sports"
+    disallowed_paths: []
+  cadence: "60s"
+
+  # Primary: proto JSON feeds (lightweight + fast when they work)
+  proto:
+    feeds:
+      # Basketball
+      - sport: basketball
+        league: nba
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/basketball/nba?lang=en"
+      # Hockey (note: 'ice-hockey', not 'hockey')
+      - sport: ice-hockey
+        league: nhl
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/ice-hockey/nhl?lang=en"
+      # Baseball
+      - sport: baseball
+        league: mlb
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/baseball/mlb?lang=en"
+      # Tennis
+      - sport: tennis
+        league: atp
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/tennis/atp?lang=en"
+      - sport: tennis
+        league: wta
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/tennis/wta?lang=en"
+      # American Football
+      - sport: football
+        league: nfl
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/football/nfl?lang=en"
+      # Soccer (heavy; okay to keep but expect large payloads/timeouts)
+      - sport: soccer
+        league: all
+        url: "https://www.bovada.lv/services/sports/event/v2/events/A/description/soccer?lang=en"
+
+  # Fallback: Playwright harvester (captures the same live XHR JSON the SPA uses)
+  harvest:
+    start_urls:
+      - "https://www.bovada.lv/sports/basketball/nba"
+      - "https://www.bovada.lv/sports/ice-hockey/nhl"
+      - "https://www.bovada.lv/sports/baseball/mlb"
+      - "https://www.bovada.lv/sports/tennis/atp"
+      - "https://www.bovada.lv/sports/tennis/wta"
+      - "https://www.bovada.lv/sports/football/nfl"
+      - "https://www.bovada.lv/sports/soccer"
+      - "https://www.bovada.lv/sports/live"
+    xhr_allow:
+      - "/services/sports/event/v2/events"
+      - "/services/sports/event/v2/live"
+      - "\\.json(\\?|$)"
+    wait_for:
+      - "body"
+    headless: false
+    max_time_s: 10
+
+  market_map:
+    FT_1X2:
+      description_keywords: ["3-way", "match result", "result", "regulation", "regular time"]
+    FT_ML_2W:
+      description_keywords: ["moneyline", "money line", "ml"]
+    FT_SPREAD:
+      description_keywords: ["point spread", "puck line", "run line", "spread", "handicap", "line"]
+    FT_TOTAL:
+      description_keywords: ["total", "totals", "over/under", "o/u"]
+
+
+- key: cloudbet
+  name: Cloudbet
+  website: "https://www.cloudbet.com"
+  enabled: true
+  compliance_mode: api  # Official Feed API; requires API key
+  registry:
+    robots_url: "https://www.cloudbet.com/robots.txt"
+    tos_url: "https://www.cloudbet.com/en/help/rules"
+    tos_notes: "Official API integration (Feed). Key required."
+    allowed_paths:
+       - "/api"
+       - "https://sports-api.cloudbet.com"
+    disallowed_paths: []
+  cadence: "90s"
+  proto:
+    auth: header_x_api_key
+    api_base: "https://sports-api.cloudbet.com/pub/v2/odds"
+    feeds:
+      - sport: soccer
+        competition_key: "soccer-england-premier-league"
+        markets: ["soccer.matchOdds"]
+      - sport: basketball
+        competition_key: "basketball-usa-nba"
+        markets: ["basketball.moneyline"]
+      - sport: ice-hockey
+        competition_key: "ice-hockey-usa-nhl"
+        markets: ["ice-hockey.moneyline"]
+      - sport: baseball
+        competition_key: "baseball-usa-mlb"
+        markets: ["baseball.moneyline"]
+
+- key: betonline
+  name: BetOnline
+  website: "https://www.betonline.ag"
+  base_url: "https://www.betonline.ag/sportsbook"
+  enabled: true              # enable to test the harvester
+  compliance_mode: loose     # concept-phase; still honest UA & cadence/backoff
+  registry:
+    robots_url: "https://www.betonline.ag/robots.txt"
+    tos_url: "https://www.betonline.ag/terms-conditions"
+    allowed_paths: []
+    disallowed_paths: []
+  cadence: "120s"
+  # Browser harvester configuration (generic; works for any CF/JS site)
+  harvest:
+    # Pages to open (you can expand this list)
+    start_urls:
+      - "https://www.betonline.ag/sportsbook/basketball/nba"
+      - "https://www.betonline.ag/sportsbook/hockey/nhl"
+      - "https://www.betonline.ag/sportsbook/baseball/mlb"
+      - "https://www.betonline.ag/sportsbook/tennis/atp"
+      - "https://www.betonline.ag/esports"
+    # Capture only XHR/JSON that matches any of these patterns (substring or regex)
+    xhr_allow:
+      - "ultraplay"          # UltraPlay endpoints (common for esports; sometimes for other markets)
+      - "\\.json(\\?|$)"     # any .json request
+      - "/api/"              # any /api/ path
+    # Optional CSS selectors to wait for after navigation (stabilize DOM)
+    wait_for:
+      - "body"
+    # Headful helps early dev (flip to true for CI)
+    headless: false
+    # Extra idle time (seconds) to allow XHR to settle
+    max_time_s: 8
+  # Proto endpoints (leave empty until the team discovers stable JSON)
+  proto:
+    feeds: []
+  market_map:
+    FT_1X2:
+      description_keywords: ["3-way", "match result", "result", "regulation", "regular time"]
+    FT_ML_2W:
+      description_keywords: ["moneyline", "money line", "ml"]
+    FT_SPREAD:
+      description_keywords: ["point spread", "puck line", "run line", "spread", "handicap", "line"]
+    FT_TOTAL:
+      description_keywords: ["total", "totals", "over/under", "o/u"]

@@ -1,0 +1,10 @@
+# Per-book cadence & backoff; step down near kickoff; exponential backoff on errors
+cadence:
+  default: 10m
+  t_minus_120m: 5m
+  t_minus_30m: 90s
+  t_minus_5m: 30s
+backoff:
+  initial: 30s
+  factor: 2
+  max: 10m

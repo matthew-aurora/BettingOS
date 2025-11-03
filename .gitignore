@@ -1,0 +1,32 @@
+# venv & Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# env/config/secrets
+.env
+.env.*
+*.local
+
+# caches & logs
+.etag_cache.json
+*.log
+
+# editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# playwright
+playwright/.cache/
+**/playwright-report/
+**/blob-report/
+
+# docker artifacts
+*.pid
+
+# data dumps
+dump/
+*.bson
+*.gz
